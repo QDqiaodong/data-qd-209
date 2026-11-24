@@ -3,7 +3,11 @@ from .checks import fields,array,ident,integer
 def process(data):
  fields(data,('sections','symbols','relocations'));sections={}
  for s in array(data['sections'],1,100):
-  fields(s,('name','base','size'));k=ident(s['name']);sections[k]=(integer(s['base'],0,1_000_000),integer(s['size'],1,100_000))
+  fields(s,('name','base','size'));k=ident(s['name']);
+  if k in sections:raise ValueError('duplicate section')
+  sections[k]=(integer(s['base'],0,1_000_000),integer(s['size'],1,100_000))
+ ordered=sorted((base,base+size,key) for key,(base,size) in sections.items())
+ if any(left[1]>right[0] for left,right in zip(ordered,ordered[1:])):raise ValueError('overlapping sections')
  symbols={}
  for s in array(data['symbols'],0,1000):
   fields(s,('name','section','offset','global'));k=ident(s['name']);
@@ -18,5 +22,6 @@ def process(data):
   if sec not in sections or sym not in symbols or off+width>sections[sec][1]:raise ValueError('invalid relocation')
   value=symbols[sym]['address']+add
   if not 0<=value<1<< (8*width):raise ValueError('relocation overflow')
+  if any(x['id']==k or x['section']==sec and off<x['offset']+x['width'] and x['offset']<off+width for x in rel):raise ValueError('duplicate id or overlapping relocation writes')
   rel.append({'id':k,'section':sec,'offset':off,'symbol':sym,'width':width,'value':value,'bytes':[value>>(8*i)&255 for i in range(width)]})
  return {'symbols':symbols,'relocations':rel,'summary':{'sections':len(sections),'symbols':len(symbols),'relocations':len(rel)}}

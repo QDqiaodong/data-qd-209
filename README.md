@@ -31,7 +31,7 @@ publish("run/another.json", process(load("fixtures/input.json")))
 {"relocations": 1, "sections": 2, "symbols": 2}
 ```
 
-已通过 6 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+已通过 7 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 
