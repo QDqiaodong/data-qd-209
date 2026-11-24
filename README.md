@@ -77,6 +77,18 @@ bundle = build_release_bundle({"releases": [...], "targets": [...], "receipts": 
 
 image/relocation 合成、atomic 单元、chunk 规范化、`bundle_id`、回执选择、批次装箱和拒绝边界见 [数据契约](docs/contract.md) 的“目标内存差分发布包”小节。
 
+## 发布执行日志对账与一致性恢复 `reconcile_rollout`
+
+`obj_reloc.reconcile_rollout` 是与前五个入口并列的独立离线恢复 API，接收只含 `bundle`、`groups`、`journals` 的 JSON 对象。它先调用 `build_release_bundle(bundle)` 得到本次规范 `bundle_id` 与各 target 的完整 forward/rollback manifest，再沿每个 target 当前 bundle_id 下最大 attempt 的 previous 链（跨重启 attempt 续接，被放弃分支不拼接）按 seq 重放追加日志，重建 `clean`/`forward_partial`/`forward_complete`/`committed`/`rollback_partial` 状态，并按 `atomic`/`independent` 组策略给出 `stable`、`finish_forward`、`commit_all`、`restore_old`、`independent_recovery` 决定与逐目标 `hold`/`commit`/`continue_forward`/`continue_rollback` 精确命令。日志只证明已持久化事实，不改变 bundle；非法链、未知/冲突单元、过早 commit/rollback_complete、commit 后回滚冲突等一律 `ValueError` 拒绝整份输入。它不连接设备、不实际写内存、不伪造执行成功，也不新增 CLI。
+
+```python
+from obj_reloc import reconcile_rollout
+result = reconcile_rollout({"bundle": {...}, "groups": [...],
+                            "journals": [...]})
+```
+
+日志选择、链重建、状态机校验、组级决定、命令单元排序与输出结构见 [数据契约](docs/contract.md) 的“发布执行日志对账与一致性恢复”小节；前五个 API 的既有契约保持不变。
+
 已通过 75 项业务测试（原有 59 项与新增差分发布包测试），并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界

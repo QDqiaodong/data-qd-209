@@ -90,3 +90,30 @@ relocation 的比较身份为 `(object,id)`，明细按该身份排序。每侧�
 规范 bundle 正文包含排序后的 release 摘要/地址范围/字节数、去重 chunks，以及排序后 target 的 current/candidate/erase_byte/atomic ranges 和完整 forward/rollback manifest；不含 receipt 选择、pending batch 或 `bundle_id`。正文以 `ensure_ascii=True`、`sort_keys=True`、紧凑分隔符序列化后的 SHA-256 为 `bundle_id`，输入数组重排不改变该 id。
 
 仅选择 target 下 `bundle_id` 相同且 `observed_at` 最大的 receipt 做续传；同一 bundle 的任一 receipt 引用非该 target manifest chunk 均拒绝整份输入，其他 bundle_id 的旧 receipt 不抵扣也不校验当前 chunk。输出 target 还给出选中 receipt id（`receipt_id`/`selected_receipt` 等别名）、排序后的 `acknowledged_chunks`、`pending_chunks` 与贪心顺序批次 `pending_batches`。批次按 chunk_id 字典序装包，单 chunk 不拆分，总 `bytes` 不超过 `max_batch_bytes`，放不下即开下一批。空 forward manifest 为 `up_to_date`；有写入且无 pending chunk 为 `ready`；否则为 `transfer_pending`。`summary` 含 `releases,targets,chunks,forward_units,rollback_units,payload_bytes,pending_targets,up_to_date_targets`。
+
+## 发布执行日志对账与一致性恢复 `reconcile_rollout(data)`
+
+独立于前五个入口的离线路径恢复 API，供离线发布控制器在目标代理重启、重复上报或跨目标切换中断后重建各目标已持久化的发布状态，并决定同一一致性组的下一步。它不连接设备、不实际写内存、不伪造执行成功、不新增 CLI，也不改变 `process`/`link`/`certify`/`assess_upgrade`/`build_release_bundle` 的输入、输出与拒绝边界。输入只含 `bundle`、`groups`、`journals`；未知字段、bool 充当整数、重复身份、非法引用、容量超限、日志链错误、非法状态转换或 `build_release_bundle(bundle)` 失败，都以 `ValueError` 拒绝整份输入，不返回部分对账结果。
+
+- `bundle` 是现有 `build_release_bundle` 可接受的完整输入。对账前必须先调用该 API，得到本次规范 `bundle_id` 与各 target 的完整 forward/rollback manifest；日志只证明目标代理已持久化的执行事实，不得改变 bundle、chunk、manifest 或 `bundle_id`。
+- `groups` 1..32 项 `{id,targets,policy}`：id 唯一；targets 为 1..32 个不重复的 bundle target id，每个 target 必须且只能属于一个 group，且所有 bundle targets 都必须被覆盖；policy 仅 `atomic` 或 `independent`。`atomic` 表示组内共享一个不可逆提交点：任一目标持久化 commit 后其余目标不能回到旧版本；`independent` 允许各目标按自身日志单独完成或回滚。
+- `journals` 0..20000 项 `{id,target,bundle_id,attempt,previous,events}`：id 全局唯一；target 必须存在；`bundle_id` 为字符串；attempt 为 1..1000000000 整数；同一 `(target,bundle_id,attempt)` 只能一项。previous 为 null 或同一 target、同一 bundle_id、较小 attempt 的 journal id。events 0..4096 项 `{seq,type,unit}`，seq 从 1 起连续递增；type 仅 `forward_applied`/`commit`/`rollback_applied`/`rollback_complete`；applied 事件的 unit 是对应 manifest 单元的 `{base,atomic_range}` 身份，commit/rollback_complete 的 unit 必须为 null。全部 events 合计至多 200000。
+
+日志选择与链重建：只选择本次计算出的 bundle_id 的日志；其他 bundle_id 的日志作为旧历史忽略，既不提供当前进度，也不要求其中 unit 存在于当前 manifest。对每个 target，从当前 bundle_id 下 attempt 最大的 journal 开始沿 previous 反向取链；链必须终止于 previous=null，不得成环、断链、跨 target/bundle 或跳到不小于当前 attempt。未被最新链引用的较早分支是被放弃尝试，其进度不得与最新链拼接，只在输出中列为 `abandoned_journals`。链内按 attempt 升序、段内 seq 升序重放，输入数组排列不影响选择与结果。
+
+重放按完整 manifest 校验，而非只看事件名称：
+
+- `forward_applied` 只能引用该 target forward manifest 中尚未成功应用的单元；同一有效链内重复上报同一单元是幂等重放，不重复计数。`commit` 只有在全部 forward 单元都已应用后才合法；空 forward manifest 的 target 视为初始即完成前向，但仍需显式 commit 才跨过提交点。commit 最多一次，提交后不得再出现 forward_applied。
+- `rollback_applied` 只能引用 rollback manifest 单元；提交前只允许回滚已前向应用单元对应 base 的 rollback 单元，尚未前向应用的单元不得伪造回滚；commit 后禁止任何 rollback 事件。`rollback_complete` 只有在所有已前向应用单元都已回滚后才合法，完成后不得再出现其他事件。
+- forward 与 rollback manifest 按 base 一一对应。日志 `{base,atomic_range}` 必须与目标 manifest 精确匹配：不能只用 base 猜测 atomic 身份，也不能引用别的 target，即使 chunk 相同。base 存在但 atomic_range 冲突按身份冲突拒绝。
+
+目标重建状态为 `clean`（无当前 bundle 有效事件，或 rollback_complete 后已回到旧版本）、`forward_partial`、`forward_complete`、`committed`、`rollback_partial`。输出同时给出历史已前向应用 `applied`、已回滚 `rolled_back`、当前仍需前向 `pending_forward` 与仍需回滚 `pending_rollback`；rollback_complete 后历史明细保留，但当前已应用集合为空、`pending_forward` 恢复为完整 manifest。某个 journal 的完整有效链是审计边界，被放弃分支不得补齐进度；全局 chunk 去重不允许跨目标共享执行进度。
+
+组级恢复决定约束目标级命令：
+
+- `independent` 逐目标判断：committed 或 clean 为 `hold`；forward_complete 为 `commit`；forward_partial 为 `continue_forward`；rollback_partial 为 `continue_rollback`。全部 hold 时组 decision 为 `stable`，否则为 `independent_recovery`。
+- `atomic` 任一目标 committed 时组 decision 为 `finish_forward`：committed 目标 hold，forward_complete 目标 commit，clean/forward_partial 目标 continue_forward；此时组内存在任何 rollback 状态即与不可逆提交点冲突，整份输入拒绝。
+- `atomic` 尚无 committed 时，任一目标 rollback_partial，或任一目标有前向进度而另一目标 clean，decision 为 `restore_old`：所有非 clean 目标 continue_rollback（尚未开始回滚时也从其已应用集合生成完整待回滚清单），clean 目标 hold。
+- `atomic` 尚无 committed 且全部 forward_complete 时 decision 为 `commit_all`，每目标命令为 commit（计划命令不代表已执行，调用方需再次对账确认）；全部 clean 为 `stable`；其余无非 clean 以外状态且非 clean 目标均为 forward_partial（或仅含 forward_complete 与 forward_partial 的混合）时 decision 为 `finish_forward`，各目标继续自身剩余前向或先完成 commit。
+
+每条命令含 `action`、`reason` 与精确 `units`：continue_forward 给出尚未应用的 forward 单元；continue_rollback 给出已前向应用但尚未回滚的 rollback 单元，按 rollback manifest 的 base 降序输出；commit 与 hold 的 units 为空。成功结果含：`bundle`（本次 `bundle_id` 与 build_release_bundle summary）；`targets`（按 target id 排序，给出所属 group、选中 journal/attempt 或 null、有效链 journal ids、被放弃的当前 bundle journal ids、state、committed、applied/rolled_back 与 pending_forward/pending_rollback；单元身份含 base、size、atomic_range、chunk_id）；`groups`（按 group id 排序，给出 policy、decision 与按 target id 排序的 commands）；`summary`（groups、targets、各 state 数量与 stable/finish_forward/commit_all/restore_old/independent_recovery 决定计数）。仅重排 groups、targets、journals、events 或既有 bundle 可重排数组时，结果必须相同；events 数组打乱但 seq 连续时按 seq 重建。
