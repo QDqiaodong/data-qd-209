@@ -74,3 +74,19 @@ relocation 的比较身份为 `(object,id)`，明细按该身份排序。每侧�
 - 部分对象在两侧、部分仅在一侧且没有混合两类独占对象时，consumer 仍按两侧均存在处理；仅一侧对象带来的 added/removed relocation 会一致地推出 `rebind_required`，无 relocation 变化时才可 `keep_running`。
 
 只改变 `binding_policy` 不改变计划或比较明细，但动作必须按新契约重新计算。成功结果的 `current`、`candidate` 字段分别是 `link` 返回的 `summary`；`summary` 同时扁平给出四个动作计数、在 `actions` 中给出同一组计数，并给出 `consumers` 总数（以及与既有 API 命名一致的 `total` 同义字段）。混合新增与删除不产生第五种成功动作，而是按上述规则整份拒绝。consumer/object 数组及两份计划中现有可重排数组的排列均不影响输出。`process(data)`、`link(data)`、`certify(data)` 的输入、输出和拒绝边界保持不变。
+
+## 目标内存差分发布包 `build_release_bundle(data)`
+
+独立于前四个入口的离线差分发布 API，不连接设备、不实际写内存，也不解析或执行 ELF/PE/机器码、不提供 CLI。输入只含 `releases`、`targets`、`receipts`；未知字段、bool 整数、非法字节/ID、重复身份、非法引用或任一 release 的 `link(plan)` 失败，都按既有 `ValueError` 边界拒绝整份输入。
+
+- `releases` 1..32 项 `{id,plan,images}`：`plan` 是完整 `link` 输入；`images` 必须按 `(object,section)` 为每个链接 section 恰好提供长度等于 `size` 的 0..255 数组。先应用原始 image，再把 `link` relocation 的最终小端 bytes 覆盖到对应偏移，得到最终绝对地址映射。全部 image bytes 至多 4,000,000。
+- `targets` 1..64 项 `{id,current,candidate,erase_byte,atomic_ranges,max_batch_bytes}`：current/candidate 必须引用 release，允许相同。atomic range 为目标内唯一 `{id,base,size}`，size 1..65536，半开区间不得重叠，且每个地址必须同时被 current/candidate section 覆盖。
+- `receipts` 0..10000 项 `{id,target,bundle_id,observed_at,acked_chunks}`：id 全局唯一，target 必须存在，时间 0..1e9，`(target,bundle_id,observed_at)` 唯一；acked chunk id 为不重复的小写 SHA-256 十六进制字符串。
+
+比较两侧最终绝对地址映射：candidate 覆盖地址以 candidate 为期望；仅 current 覆盖地址以目标 `erase_byte` 为期望；仅 candidate 覆盖地址的回滚值也是 `erase_byte`；两侧均不覆盖的地址不属于发布范围。对象/section 身份变化但最终地址字节相同不产生写入。非 atomic 变化按绝对地址合并为最大连续变化区间；atomic range 中任一字节变化时，整个 range 成为一个 base/size 不变、不可拆分的单元，前向取 candidate 完整 range，回滚取 current 完整 range。无变化 atomic range 不产生单元，但其 `{id,base,size}` 属于规范化 target 契约，边界变化会改变 `bundle_id`。
+
+单元位于 target 的 `forward`/`rollback` manifest（同时提供 `forward_manifest`/`rollback_manifest` 别名），按 base 排序，每项为 `{base,size,atomic_range,chunk_id}`；普通区间的 `atomic_range` 为 `null`。payload 是 bytes 数组，其 `chunk_id` 为 `json.dumps(bytes, ensure_ascii=True, separators=(',',':'))` 的 SHA-256 十六进制。全 bundle 的 `chunks` 按 id 排序并去重为 `{chunk_id,bytes,size}`；地址、方向和 target 不参与 chunk id。任一 manifest chunk 大于引用目标的 `max_batch_bytes` 即整份拒绝。
+
+规范 bundle 正文包含排序后的 release 摘要/地址范围/字节数、去重 chunks，以及排序后 target 的 current/candidate/erase_byte/atomic ranges 和完整 forward/rollback manifest；不含 receipt 选择、pending batch 或 `bundle_id`。正文以 `ensure_ascii=True`、`sort_keys=True`、紧凑分隔符序列化后的 SHA-256 为 `bundle_id`，输入数组重排不改变该 id。
+
+仅选择 target 下 `bundle_id` 相同且 `observed_at` 最大的 receipt 做续传；同一 bundle 的任一 receipt 引用非该 target manifest chunk 均拒绝整份输入，其他 bundle_id 的旧 receipt 不抵扣也不校验当前 chunk。输出 target 还给出选中 receipt id（`receipt_id`/`selected_receipt` 等别名）、排序后的 `acknowledged_chunks`、`pending_chunks` 与贪心顺序批次 `pending_batches`。批次按 chunk_id 字典序装包，单 chunk 不拆分，总 `bytes` 不超过 `max_batch_bytes`，放不下即开下一批。空 forward manifest 为 `up_to_date`；有写入且无 pending chunk 为 `ready`；否则为 `transfer_pending`。`summary` 含 `releases,targets,chunks,forward_units,rollback_units,payload_bytes,pending_targets,up_to_date_targets`。

@@ -66,7 +66,18 @@ result = assess_upgrade({"current": {...}, "candidate": {...},
 
 比较明细、写入地址口径、排序与拒绝边界见 [数据契约](docs/contract.md) 的“目标计划升级影响评估”小节。
 
-已通过 59 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+## 目标内存差分发布包 `build_release_bundle`
+
+`obj_reloc.build_release_bundle` 是新的独立离线发布控制器 API，接收只含 `releases`、`targets`、`receipts` 的 JSON 对象。它把原始 section image 与 `link(plan)` relocation 覆盖合成为最终绝对地址映射，跨 current/candidate 比较字节，生成支持 atomic range 和精确 rollback 的 chunk/manifest；相同 payload 跨地址、方向和目标去重。历史回执只选择匹配当前 `bundle_id` 的最新一份来生成 `pending_batches`，从而支持传输中断后续传。它不连接设备、不实际写内存、不解析或执行 ELF/PE/机器码，也不新增 CLI。
+
+```python
+from obj_reloc import build_release_bundle
+bundle = build_release_bundle({"releases": [...], "targets": [...], "receipts": [...]})
+```
+
+image/relocation 合成、atomic 单元、chunk 规范化、`bundle_id`、回执选择、批次装箱和拒绝边界见 [数据契约](docs/contract.md) 的“目标内存差分发布包”小节。
+
+已通过 75 项业务测试（原有 59 项与新增差分发布包测试），并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 
