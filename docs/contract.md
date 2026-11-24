@@ -39,3 +39,38 @@ relocations为0..2000项唯一id、既有section/symbol、offset、addend整数�
 request 只有在 plan 至少含一条 relocation 且每条 relocation 都 `certified` 时才是 `certified`；零 relocation 的 plan 返回 `no_relocations`，不签发空认证；否则 request 状态为各未通过 relocation 中严重度最高者（`conflict`>`mismatch`>`insufficient`），且不产生部分 certificate。
 
 成功结果：`plan` 含现有 link summary 与按 `(object,id)` 排序的预期 relocation 身份（object/id/section/offset/width）、实际写入地址 address 与 expected bytes；`requests` 按 request id 排序，每项给出 target/as_of/门槛/最终 status，逐 relocation 列出 match、incomplete、mismatch 的 collector/group/capture/observed_at 身份与实际观察到的相关字节（未覆盖位为 null），以及门槛判断（min_collectors/min_groups/match_collectors/match_groups/met），冲突可追溯到具体 capture。对 `certified` 项给出 `certificate`：request/target/as_of、门槛、完整预期 relocation 身份，以及每条 relocation 的 witness——match collector 先按 `(group,collector)` 排序取到 min_groups 个不同 group，再按同一顺序补足 min_collectors，多余 match、incomplete 与无关 capture 不写入证书。`certificate_id` 是 certificate 正文（不含 certificate_id）按 UTF-8、`ensure_ascii=True`、键排序、紧凑分隔符 `(',',':')` 序列化后的 SHA-256 十六进制；诊断列表、未选 witness 与输入排列不影响 certificate_id。`summary` 给出 requests 各状态计数、certified 数与总数。仅重排 collectors、targets、captures、requests、ranges 或 plan 中现有可重排数组时，语义结果与 certificate_id 必须相同。
+
+## 目标计划升级影响评估 `assess_upgrade(data)`
+
+独立于 `process`/`link`/`certify` 的离线升级影响评估入口，不连接设备、不执行目标代码、不读取读回 capture，也不签发部署认证。输入是只含 `current`、`candidate`、`consumers` 的 JSON 对象，沿用未知字段、bool 充当整数、非法标识符、重复身份与引用错误的拒绝约定；任何输入错误或任一侧 `link` 失败都以 `ValueError` 拒绝整份输入，不返回部分评估。
+
+- `current`、`candidate` 各自都是现有 `link` 可接受的完整输入，代表同一目标地址空间中替换前后的完整计划。API 分别独立调用 `link(current)` 与 `link(candidate)`，不把一侧的布局、符号胜出结果或索引带入另一侧。
+- `consumers` 1..256 项 `{id,objects,binding_policy}`：`id` 唯一且为合法标识符；`objects` 为 1..32 个不重复的目标对象 id；`binding_policy` 只能是 `address` 或 `provider`。一个对象 id 最多归属一个 consumer。每个对象引用都必须至少出现在 current 或 candidate 一侧；consumer 也因此至少有一个可评估对象。
+
+对象存在性以两份已验证计划的对象 id 表为准（允许对象没有 section 或 relocation）。若一个 consumer 同时含有仅 current 存在和仅 candidate 存在的对象，整份输入拒绝；不得把这种混合迁移折算成新增、删除或继续运行。
+
+relocation 的比较身份为 `(object,id)`，明细按该身份排序。每侧绑定事实包含现有 `link` relocation 行中的 `section`、`offset`、`width`、`target:{object,name}`、目标符号 `address`、`value`、`bytes`，并补充由 link sections 推出的实际写入地址 `write_address=section.base+offset`。每条明细为：
+
+```json
+{
+  "object": "o1",
+  "id": "r1",
+  "status": "unchanged | changed | added | removed",
+  "current": {"...": "current 侧完整绑定事实；added 时为 null"},
+  "candidate": {"...": "candidate 侧完整绑定事实；removed 时为 null"},
+  "changed_fields": ["发生变化的顶层绑定字段"],
+  "field_differences": {"field": {"current": null, "candidate": null}}
+}
+```
+
+`added`/`removed` 由比较身份是否只在一侧存在决定；两侧都有但任一绑定事实不同为 `changed`，否则为 `unchanged`。`changed_fields` 按 `section,offset,width,target,address,write_address,value,bytes` 的固定比较顺序输出；`field_differences` 保留两侧值以便复核。
+
+每个 consumer 输出按 id 排序的 `{id,objects,binding_policy,action,relocations}`，其中 `objects` 也按 id 字典序排序。唯一动作按下列规则从明细推出：
+
+- `keep_running`：consumer 在两份计划均存在，没有 added/removed relocation 身份，且每条共同 relocation 的 `write_address` 与 `bytes` 不变；`provider` 契约还要求 `target` 限定身份不变。无 relocation consumer 在两份计划均存在时为此动作。
+- `rebind_required`：consumer 在两份计划均存在，但有 relocation 身份增删、`write_address` 或最终 `bytes` 改变；`provider` 契约下 `target.object`/`target.name` 改变也必须重绑定。`address` 契约允许 target 提供者限定身份变化，只要写入地址与 bytes 不变。
+- `activate_new`：consumer 的全部对象仅在 candidate 存在；明细列出 candidate 侧 added relocation。
+- `stop_removed`：consumer 的全部对象仅在 current 存在；明细列出 current 侧 removed relocation。
+- 部分对象在两侧、部分仅在一侧且没有混合两类独占对象时，consumer 仍按两侧均存在处理；仅一侧对象带来的 added/removed relocation 会一致地推出 `rebind_required`，无 relocation 变化时才可 `keep_running`。
+
+只改变 `binding_policy` 不改变计划或比较明细，但动作必须按新契约重新计算。成功结果的 `current`、`candidate` 字段分别是 `link` 返回的 `summary`；`summary` 同时扁平给出四个动作计数、在 `actions` 中给出同一组计数，并给出 `consumers` 总数（以及与既有 API 命名一致的 `total` 同义字段）。混合新增与删除不产生第五种成功动作，而是按上述规则整份拒绝。consumer/object 数组及两份计划中现有可重排数组的排列均不影响输出。`process(data)`、`link(data)`、`certify(data)` 的输入、输出和拒绝边界保持不变。

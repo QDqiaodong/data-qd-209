@@ -54,7 +54,19 @@ result = certify({"plan": {...}, "collectors": [...], "targets": [...],
 
 最新 capture 选取、逐 relocation 判定、witness 选择、`certificate_id` 规范形与输出结构见 [数据契约](docs/contract.md) 的“部署重定位读回认证”小节；`process` 与 `link` 的既有契约保持不变。
 
-已通过 44 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+## 目标计划升级影响评估 `assess_upgrade`
+
+`obj_reloc.assess_upgrade` 是与前三个入口并列的独立离线评估 API，接收只含 `current`、`candidate`、`consumers` 的 JSON 对象。两份计划分别独立调用 `link`，再按消费者的 `address`/`provider` 契约比较 `(object,id)` relocation 绑定，输出 `keep_running`、`rebind_required`、`activate_new`、`stop_removed` 四种动作及计数；混合新增/删除对象、未知引用、重复归属或任一侧链接失败均拒绝整份输入。它不连接设备、不执行目标代码、不读取 capture，也不签发认证。
+
+```python
+from obj_reloc import assess_upgrade
+result = assess_upgrade({"current": {...}, "candidate": {...},
+                         "consumers": [...]})
+```
+
+比较明细、写入地址口径、排序与拒绝边界见 [数据契约](docs/contract.md) 的“目标计划升级影响评估”小节。
+
+已通过 59 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 

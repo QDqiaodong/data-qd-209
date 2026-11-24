@@ -2,3 +2,4 @@
 from .service import process
 from .linker import link
 from .certify import certify
+from .assessment import assess_upgrade
