@@ -42,7 +42,19 @@ result = link({"regions": [...], "objects": [...]})
 
 字段范围、解析规则、排序保证与输出结构见 [数据契约](docs/contract.md) 的“多对象链接”小节；`process` 的单对象契约保持不变。
 
-已通过 22 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+## 部署重定位读回认证 `certify`
+
+`obj_reloc.certify` 是与 `process`/`link` 并列的独立入口，接收只含 `plan`、`collectors`、`targets`、`captures`、`requests` 的结构化 JSON。链接结果写入目标内存后，它核对各采集方在不同时刻的地址区间读回，判断每次发布请求是否已有足够独立、仍受信任且彼此不冲突的证据，确认所有计划重定位字节确实落在目标地址；同样是离线数据 API，不连接设备、不解析或执行 ELF/PE/机器码，也不提供 CLI。任何输入错误都按既有 ValueError 约定拒绝整份输入，不返回部分 request 或 certificate。
+
+```python
+from obj_reloc import certify
+result = certify({"plan": {...}, "collectors": [...], "targets": [...],
+                  "captures": [...], "requests": [...]})
+```
+
+最新 capture 选取、逐 relocation 判定、witness 选择、`certificate_id` 规范形与输出结构见 [数据契约](docs/contract.md) 的“部署重定位读回认证”小节；`process` 与 `link` 的既有契约保持不变。
+
+已通过 44 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 
