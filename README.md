@@ -31,7 +31,18 @@ publish("run/another.json", process(load("fixtures/input.json")))
 {"relocations": 1, "sections": 2, "symbols": 2}
 ```
 
-已通过 7 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+## 多对象链接 `link`
+
+`obj_reloc.link` 是与 `process` 并列的独立入口，接收只含 `regions`、`objects` 的结构化 JSON，完成确定性内存布局、跨对象 strong/weak 符号解析与小端重定位编码；同样是离线数据 API，不解析或执行 ELF/PE/机器码，也不提供 CLI。任何输入错误都按既有 ValueError 约定拒绝整份输入，不返回部分结果。
+
+```python
+from obj_reloc import link
+result = link({"regions": [...], "objects": [...]})
+```
+
+字段范围、解析规则、排序保证与输出结构见 [数据契约](docs/contract.md) 的“多对象链接”小节；`process` 的单对象契约保持不变。
+
+已通过 22 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 
