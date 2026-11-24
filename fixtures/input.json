@@ -1,0 +1,38 @@
+{
+  "sections": [
+    {
+      "name": "text",
+      "base": 4096,
+      "size": 32
+    },
+    {
+      "name": "data",
+      "base": 8192,
+      "size": 16
+    }
+  ],
+  "symbols": [
+    {
+      "name": "entry",
+      "section": "text",
+      "offset": 4,
+      "global": true
+    },
+    {
+      "name": "msg",
+      "section": "data",
+      "offset": 2,
+      "global": false
+    }
+  ],
+  "relocations": [
+    {
+      "id": "r1",
+      "section": "text",
+      "offset": 8,
+      "symbol": "msg",
+      "addend": 0,
+      "width": 2
+    }
+  ]
+}
