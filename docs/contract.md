@@ -22,6 +22,142 @@ relocations为0..2000项唯一id、既有section/symbol、offset、addend整数�
 
 成功结果：`sections` 按 `(region,object,section)` 排序给出 object/name/region/base/size/alignment；`symbols.definitions` 给出全部定义的限定身份、绝对地址与 binding，`symbols.globals` 逐全局名称给出 winner 及 shadowed weak 候选；`relocations` 按 `(object,id)` 排序，含原始身份、解析目标限定身份、目标地址、value 与小端 bytes；`summary` 给出 regions/objects/sections/symbols/relocations 计数。仅重排任一输入数组时输出必须逐字节一致。`process` 的单对象输入、输出与拒绝边界保持不变。
 
+## 映像地址窗口整批分配档案 `ImageArchive`
+
+`obj_reloc.ImageArchive`（以及模块函数 `create_archive(path, windows)` / `open_archive(path, windows=None)`）是与 `link` 并列的持久化整批分配接口。它只规划结构化地址图并保存 `link` 结果，不写入目标地址、不连接设备，也不读写 ELF/PE/机器码或其他可执行文件。`process`、`link` 及后续既有 API 的输入输出契约不变。
+
+### 档案与窗口目录
+
+每个目录是一个本地顺序档案，状态原子保存在目录内的 `image_archive.json`（格式标识 `obj-reloc-image-archive`，版本 1）。创建方式：
+
+```python
+from obj_reloc import ImageArchive
+
+archive = ImageArchive.create("tmp/batch-archive", [
+    {"id": "a-low",  "base": 240, "size": 16},  # [240,256)，契约中简称 L
+    {"id": "b-high", "base": 256, "size": 16},  # [256,272)，契约中简称 H
+])
+archive.close()
+archive = ImageArchive.open("tmp/batch-archive")
+```
+
+窗口目录必须有 1..16 项；每项为 `{id,base,size}`，`id` 沿用 `[A-Za-z0-9_:-]{1,64}`，也接受 `window_id` 或 `name` 作为 ID 别名字段。`base` 为 0..1,000,000 整数，`size` 为 1..100,000 整数；半开区间 `[base,base+size)` 必须互不相交，端点相接允许。窗口目录在创建时随 `archive_id` 一起持久化；`open(path)` 不接受替换目录。若调用 `open(path, windows)`，给出的目录必须与持久化目录完全一致，否则抛 `ValueError`，不会覆盖原目录。`create_or_open(path, windows)` 仅在目录一致时重开。
+
+一个窗口最多由一个当前有效凭据持有，并且按整个窗口授予一个作业/映像；即使链接 section 只用了前几个字节，剩余空间也不会进入可再次分配的空闲碎片表。释放后整个窗口才可授予后来的作业。
+
+### 申请结构与链接试放
+
+`allocate(request)` 接收：
+
+```json
+{
+  "request_id": "req-1",
+  "jobs": [
+    {
+      "job_id": "a",
+      "window_ids": ["a-low", "b-high"],
+      "objects": ["... 与 link 的 objects 数组完全相同的对象表 ..."]
+    }
+  ]
+}
+```
+
+- request ID 为合法标识符；也接受顶层 `id` 别名。
+- `jobs` 为 1..8 项；`job_id`（或别名 `id`）在本申请内唯一。
+- `window_ids`（或别名 `windows`）是非空、无重复的已知窗口 ID 数组，最多 16 项；未知窗口 ID 是非法申请。
+- `objects` 沿用 `link` 的 `objects/sections/symbols/relocations` 字段、排序无关性和上限：对象 1..32，合计至多 100 section、1000 symbol、2000 relocation。每个作业至少一个 section，且所有 section 的 `region` 必须是约定名称 `image`。作业不提供 `regions`；档案为每个候选窗口构造唯一试放 region：
+
+```python
+{"name": "image", "base": window["base"], "size": window["size"]}
+```
+
+然后对该作业独立调用现有 `link()`。因此不同作业/映像中的同名 local、weak 或 strong 符号绝不合并解析；同一作业内部仍完全适用现有多对象 strong/weak 解析规则。
+
+申请先完成身份、结构、上限、section 存在性、region 名称、重复 strong、未定义 local/global 引用等与窗口位置无关的校验。这些错误一律抛 `ValueError`（具体可为 `ArchiveError`/`RequestMismatchError` 等 `ValueError` 子类），即使所有窗口当前已满也不能变成 `no_capacity`。实现使用同一个 `_parse_link` 解析器和同一套引用解析检查，不另造对象格式。
+
+对合法新申请，只考虑同时满足以下条件的窗口：在该作业候选集合内、当前不在 `occupancy` 中、且真实窗口试放 `link()` 成功。对齐推进后的末尾不得越过窗口末端，裸 `size <= window.size` 不代表可放；容量不足和绝对地址重定位宽度溢出由 `LinkPlacementError`（仍是 `ValueError` 子类）表示为该窗口不可用。每个“作业 × 候选窗口”的完整链接结果都会保留到最终回执。
+
+### 字典序整批方案与返回
+
+求解器按 `job_id` 字典序排列作业，在每个作业的候选窗口 ID 字典序上做带回溯的一一匹配。第一个完整方案就是“按 job ID 排列的窗口 ID 序列”的字典序最小完整方案；前几个候选先占导致后续无解时会回溯，不会把局部先到先得误判为整批无解。
+
+没有完整方案时返回普通字典：
+
+```json
+{"status": "no_capacity", "request_id": "req-1"}
+```
+
+此时不修改 `image_archive.json`、不占窗口、不签发凭据，也不保存 request ID；资源变化后可用同一 request ID 再提交。
+
+找到方案后，若档案历史凭据数加上本批作业数会超过 128，则抛 `ArchiveCapacityError`（`ValueError` 子类），整批不生效。否则单个状态文件原子写入以下全部内容：新占用、每项随机且不复用的凭据、原申请规范化正文、含完整 link 结果的原回执。成功回执为：
+
+```json
+{
+  "status": "allocated",
+  "archive_id": "arc_...",
+  "request_id": "req-1",
+  "job_count": 2,
+  "items": [
+    {
+      "job_id": "a",
+      "window_id": "b-high",
+      "credential": "cred_000000000001_...",
+      "link": {"...": "该窗口位置的完整 link() 结果"}
+    }
+  ],
+  "credentials": {"a": "cred_..."},
+  "windows": {"a": "b-high"}
+}
+```
+
+`items` 按 job ID 排序。验收样例中，作业 `a` 用 width=2、作业 `z` 用 width=1，section 均为 size=8/alignment=8 且符号 offset=0：字典序最小可行整批方案是 `a -> H`、`z -> L`；`a` 的重定位值 256 编码为 `[0,1]`，`z` 的值 240 编码为 `[240]`。`z -> H` 会因 256 超出单字节无符号范围而失败。
+
+### 幂等重交、取用、历史与释放
+
+申请正文按业务身份规范化后比较：作业按 `job_id` 排序，窗口候选按窗口 ID 排序，对象按 `id`、section 按 `name`、symbol 按 `name`、relocation 按 `id` 排序。因而作业数组、窗口候选数组和这些对象记录数组的重排不改变申请含义。
+
+- 同一成功 request ID 的等价重交：直接返回持久化的原回执深拷贝，不重新试放/分配，也不生成新凭据；即使其中部分作业已释放或窗口已由其他 request 持有，也返回原签发结果。
+- 同一 request ID 携带任何非等价申请：抛 `RequestMismatchError`。
+- 幂等判断发生在读取持久化申请之后、访问当前 `occupancy` 和窗口试放之前；不能先看空窗再判断重交。
+- `get_receipt(request_id)`（别名 `receipt` / `get_request_receipt`）返回原签发回执；未知 request ID 抛 `ArchiveError`。查询历史本身不构成授权，也不改变凭据状态。
+
+凭据是不透明字符串，服务端状态保存其固定绑定 `(archive_id, request_id, job_id, window_id, link)`。`consume(credential)`（别名 `use_credential`、`access`、`fetch`、`get_link_result`）仅当凭据记录仍为 `active` 且 `occupancy[window_id] == credential` 时返回绑定的完整 `link` 结果深拷贝；未知、已释放或窗口当前属于新凭据时抛 `CredentialError`。重复取用没有副作用。
+
+`release(credential)`（别名 `release_credential`）按精确凭据释放：
+
+- 未知凭据抛 `CredentialError`。
+- 首次释放且窗口仍由该凭据持有：同一原子状态提交中删除 occupancy 并把凭据标为 `released`，返回 `{"status":"released","changed":true,"already_released":false,...}`。
+- 对已释放凭据重复释放：返回 `changed=false, already_released=true`，不再写状态，也绝不按 window ID 清占用；因此窗口后来发给新凭据后，旧凭据的延迟重试不会使新持有者失效。
+- 释放不修改 `requests[request_id].receipt` 或其中的原始 link 结果。
+
+`window_usage()` 返回每个窗口的 `{id,base,size,end,available,holder}`，便于测试和运维查看；`credential_info(token)` 返回凭据的存储状态及当前是否实际生效。
+
+### 128 项历史上限
+
+档案永久保存所有已签发作业的凭据和回执，包括已释放项；凭据记录不会删除。`len(state.credentials)` 即已签发作业数。一个档案最多 128 项；新成功申请若会使总数超过 128，在修改状态前整批拒绝并抛 `ArchiveCapacityError`。历史 request 的等价重交、回执查询和旧凭据幂等释放不受上限影响。
+
+### 持久化与两个提交边界
+
+所有占用、凭据、申请正文和回执都在同一个 `image_archive.json` 中，因此不存在只提交一半的跨文件关系。提交实现：在同目录创建隐藏临时文件，写入并 flush/fsync，随后用 `os.replace()` 原子替换主状态文件，再 fsync 目录。调用按顺序执行即可；接口不要求、也未承诺并发写入协调。
+
+可重复触发“提交前中断”的测试方式是在测试中把 `obj_reloc.archive.os.replace` 替换为在调用真实 rename 前抛出测试异常的函数，然后调用 `allocate()`/`release()`；关闭并重新 `ImageArchive.open()` 后看不到任何 request、凭据或 occupancy 增量。仓库测试 `test_precommit_interruption_is_atomic_and_reopenable` 与 release 用例固定了该行为。
+
+可重复触发“已提交但调用方未收到应答”的方式是包装实例的内部提交方法：
+
+```python
+real_commit = archive._commit_state
+
+def commit_then_lose_reply(state):
+    real_commit(state)          # 已完成临时文件、rename 和 fsync
+    raise SimulatedNoReply()    # 应答丢失
+
+archive._commit_state = commit_then_lose_reply
+```
+
+重开档案后能看到完整占用与回执；用同一 request ID 和等价正文重试 `allocate()` 必须返回原回执且凭据数量不增加。释放场景在提交后丢失应答时，重开可见已释放；延迟重试 `release(old_credential)` 是无副作用成功，之后把同一窗口发给新凭据，再重试旧释放也不能影响新凭据。对应测试为 `test_postcommit_lost_reply_retry_returns_original_receipt` 和 `test_release_crash_boundaries_and_delayed_retry_protection`；`CrossProcessArchiveTests` 还启动独立 CPython 进程验证不同构建进程可顺序打开同一档案。
+
+合成验收测试位于 `tests/test_image_archive.py`，覆盖题目要求的 L/H 字节选择、对齐反例、两种可行方案的字典序、回溯、满窗非法引用、`no_capacity` 无部分占用、释放/重分配/延迟幂等、乱序等价重交、同 ID 冲突、128 上限、崩溃边界和跨进程顺序使用。
+
 ## 部署重定位读回认证 `certify(data)`
 
 独立于 `process`/`link` 的离线发布认证入口，同样不连接设备、不解析或执行ELF/PE/机器代码。输入是只含 `plan`、`collectors`、`targets`、`captures`、`requests` 的JSON对象，沿用未知字段、bool充当整数、非法标识符、重复身份的拒绝约定；任何错误（包括 `link(plan)` 失败）都以 ValueError 拒绝整份输入，不返回部分 request 或 certificate。

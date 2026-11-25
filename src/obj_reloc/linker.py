@@ -10,6 +10,10 @@ _BINDINGS = frozenset(('local', 'weak', 'strong'))
 _SCOPES = frozenset(('local', 'global'))
 
 
+class LinkPlacementError(ValueError):
+    """A link input is valid, but its sections/relocations do not fit a region."""
+
+
 def _enum(value, allowed, label):
     if not isinstance(value, str) or value not in allowed:
         raise ValueError(f'{label} must be one of {sorted(allowed)}')
@@ -115,7 +119,7 @@ def _layout(objects, regions):
             base = ((cursor + alignment - 1) // alignment) * alignment
             end = base + sec['size']
             if end > limit:
-                raise ValueError('section exceeds region capacity')
+                raise LinkPlacementError('section exceeds region capacity')
             bases[(oid, sec_name)] = base
             cursor = end
             rows.append({'object': oid, 'name': sec_name, 'region': region['name'],
@@ -178,7 +182,7 @@ def _resolve_globals(objects, addresses):
     return winners, globals_out
 
 
-def link(data):
+def _parse_link(data):
     fields(data, ('regions', 'objects'))
     regions = _parse_regions(array(data['regions'], 1, 16))
 
@@ -201,6 +205,22 @@ def link(data):
             raise ValueError('aggregate object table capacity exceeded')
         objects.append({'id': oid, 'sections': sections,
                         'symbols': symbols, 'relocations': relocations})
+    return regions, objects, totals
+
+
+def _check_references(objects, winners):
+    for obj in objects:
+        oid = obj['id']
+        for r in obj['relocations']:
+            if r['scope'] == 'local':
+                if r['name'] not in obj['symbols']:
+                    raise ValueError('undefined local reference')
+            elif r['name'] not in winners:
+                raise ValueError('undefined global reference')
+
+
+def link(data):
+    regions, objects, totals = _parse_link(data)
 
     bases, section_rows = _layout(objects, regions)
     addresses = _symbol_addresses(objects, bases)
@@ -224,7 +244,7 @@ def link(data):
             width = r['width']
             value = target_address + r['addend']
             if not 0 <= value < 1 << (8 * width):
-                raise ValueError('relocation overflow')
+                raise LinkPlacementError('relocation overflow')
             relocation_rows.append({
                 'object': oid, 'id': r['id'], 'section': r['section'],
                 'offset': r['offset'], 'width': width,

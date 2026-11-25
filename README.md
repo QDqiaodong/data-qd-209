@@ -42,6 +42,27 @@ result = link({"regions": [...], "objects": [...]})
 
 字段范围、解析规则、排序保证与输出结构见 [数据契约](docs/contract.md) 的“多对象链接”小节；`process` 的单对象契约保持不变。
 
+## 映像地址窗口整批分配档案 `ImageArchive`
+
+`obj_reloc.ImageArchive` / `obj_reloc.open_archive(path)` 是持久化的整批地址窗口分配接口。一个档案保存固定的 1..16 个互不相交窗口；申请包含 1..8 个作业，每个作业给出批内唯一 job ID、非空候选窗口集合和一份独立的 link `objects` 对象表。档案用每个候选窗口的 base/size 作为该作业唯一的 `image` region 实际调用 `link`，再按 job ID 顺序求字典序最小的完整一一分配。失败返回 `{"status":"no_capacity"}`，成功则原子持久化窗口占用、不透明凭据和含完整 link 结果的原回执。
+
+```python
+from obj_reloc import ImageArchive
+
+arc = ImageArchive.create("run/images", [
+    {"id": "a-low", "base": 240, "size": 16},
+    {"id": "b-high", "base": 256, "size": 16},
+])
+receipt = arc.allocate({"request_id": "batch-1", "jobs": [...]})
+link_result = arc.consume(receipt["items"][0]["credential"])
+arc.release(receipt["items"][0]["credential"])
+arc.close()
+
+arc = ImageArchive.open("run/images")  # 使用原窗口目录和持久化回执
+```
+
+同一 request ID 的等价乱序重交返回原回执；不同内容拒绝。凭据释放后立即失去取用资格，窗口可授予新凭据；旧凭据的延迟重复释放是幂等成功，不会释放新持有者。档案最多永久保留 128 项已签发作业（含已释放）。完整字段、错误边界、持久化/崩溃重放测试方式见 [数据契约](docs/contract.md) 的“映像地址窗口整批分配档案”小节。
+
 ## 部署重定位读回认证 `certify`
 
 `obj_reloc.certify` 是与 `process`/`link` 并列的独立入口，接收只含 `plan`、`collectors`、`targets`、`captures`、`requests` 的结构化 JSON。链接结果写入目标内存后，它核对各采集方在不同时刻的地址区间读回，判断每次发布请求是否已有足够独立、仍受信任且彼此不冲突的证据，确认所有计划重定位字节确实落在目标地址；同样是离线数据 API，不连接设备、不解析或执行 ELF/PE/机器码，也不提供 CLI。任何输入错误都按既有 ValueError 约定拒绝整份输入，不返回部分 request 或 certificate。
@@ -89,7 +110,7 @@ result = reconcile_rollout({"bundle": {...}, "groups": [...],
 
 日志选择、链重建、状态机校验、组级决定、命令单元排序与输出结构见 [数据契约](docs/contract.md) 的“发布执行日志对账与一致性恢复”小节；前五个 API 的既有契约保持不变。
 
-已通过 75 项业务测试（原有 59 项与新增差分发布包测试），并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+本次交付实测 `PYTHONPATH=src python3 -m unittest discover -s tests` 共 135 项全部通过：原仓库 117 项与新增映像窗口档案的 18 项合成测试；也可用 `python3 -I` 并将 `src` 加入 `sys.path` 运行。非法输入拒绝、崩溃提交边界和跨进程顺序重开均由测试覆盖；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 
