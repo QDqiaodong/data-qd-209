@@ -89,7 +89,19 @@ result = reconcile_rollout({"bundle": {...}, "groups": [...],
 
 日志选择、链重建、状态机校验、组级决定、命令单元排序与输出结构见 [数据契约](docs/contract.md) 的“发布执行日志对账与一致性恢复”小节；前五个 API 的既有契约保持不变。
 
-已通过 75 项业务测试（原有 59 项与新增差分发布包测试），并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
+## 目标链接段保留计划 `select_link_sections`
+
+`obj_reloc.select_link_sections` 是与前六个入口并列的独立离线保留分析 API，接收只含 `plan`、`roots` 的 JSON 对象。它先按现有契约完整验证并链接 `plan`，再从显式入口 section 出发，只依据结构化 relocation 记录计算必须进入目标产物的 section 可达闭包（local 引用解析到同对象本地定义，global 引用只跟随完整 plan 链接结果中的胜者），并明确哪些 section 可安全排除。输出含完整 plan 的 link summary、规范化入口、保留/排除 section 身份、逐 section 可核查且无环的入口到达依据、按原始身份过滤并规范化排序的 pruned plan，以及对 pruned plan 实际重链得到的完整 `link` 结果——移除 section 可能改变对齐布局与后续地址，重链结果不得从完整链接结果裁剪。不可达区域中的非法 relocation 或重复 strong 定义、缺失入口、过滤后不再合法等情况一律 `ValueError` 拒绝整次调用，不返回部分保留结果。它不解析或执行 ELF/PE/机器码，不推断未记录在 relocation 中的隐式引用，不实际写出二进制文件，也不新增 CLI。
+
+```python
+from obj_reloc import select_link_sections
+result = select_link_sections({"plan": {"regions": [...], "objects": [...]},
+                               "roots": [{"object": "...", "section": "..."}]})
+```
+
+闭包规则、过滤与重链口径、依据链与输出结构见 [数据契约](docs/contract.md) 的“目标链接段保留计划”小节；前六个 API 的既有契约保持不变。
+
+已通过 132 项业务测试，并核对非法输入拒绝；样例数据全部原创合成，见 [来源](fixtures/SOURCES.md)。
 
 ## 边界
 

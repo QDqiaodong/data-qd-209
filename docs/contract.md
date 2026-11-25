@@ -117,3 +117,16 @@ relocation 的比较身份为 `(object,id)`，明细按该身份排序。每侧�
 - `atomic` 尚无 committed 且全部 forward_complete 时 decision 为 `commit_all`，每目标命令为 commit（计划命令不代表已执行，调用方需再次对账确认）；全部 clean 为 `stable`；其余无非 clean 以外状态且非 clean 目标均为 forward_partial（或仅含 forward_complete 与 forward_partial 的混合）时 decision 为 `finish_forward`，各目标继续自身剩余前向或先完成 commit。
 
 每条命令含 `action`、`reason` 与精确 `units`：continue_forward 给出尚未应用的 forward 单元；continue_rollback 给出已前向应用但尚未回滚的 rollback 单元，按 rollback manifest 的 base 降序输出；commit 与 hold 的 units 为空。成功结果含：`bundle`（本次 `bundle_id` 与 build_release_bundle summary）；`targets`（按 target id 排序，给出所属 group、选中 journal/attempt 或 null、有效链 journal ids、被放弃的当前 bundle journal ids、state、committed、applied/rolled_back 与 pending_forward/pending_rollback；单元身份含 base、size、atomic_range、chunk_id）；`groups`（按 group id 排序，给出 policy、decision 与按 target id 排序的 commands）；`summary`（groups、targets、各 state 数量与 stable/finish_forward/commit_all/restore_old/independent_recovery 决定计数）。仅重排 groups、targets、journals、events 或既有 bundle 可重排数组时，结果必须相同；events 数组打乱但 seq 连续时按 seq 重建。
+
+## 目标链接段保留计划 `select_link_sections(data)`
+
+独立于前六个入口的离线保留分析 API，供离线构建系统根据给定入口选择一份多对象计划中必须进入目标产物的 section，并明确哪些 section 可安全排除。它只依据结构化 relocation 记录计算可达闭包：不解析或执行 ELF/PE/机器码，不推断未记录在 relocation 中的隐式引用（运行时反射、手写地址等不在保留承诺范围内），不实际写出二进制文件，也不提供 CLI。输入只含 `plan`、`roots`；未知字段、bool 充当整数、非法标识符、重复身份、缺失入口、完整 plan 的任一链接错误，或过滤后 pruned plan 不再合法的情况，都以 `ValueError` 拒绝整次调用，不返回部分保留结果。
+
+- `plan`：现有 `link` 可接受的完整 `regions`/`objects` 输入。分析前先按现有契约完整验证并链接该 plan；不可达区域中的非法 relocation、重复 strong 定义等错误同样使整次调用失败，分析不得把非法输入隐藏在可裁剪区域。
+- `roots` 1..100 项 `{object,section}`：身份不重复，且每个入口 section 必须存在于 plan；缺失入口拒绝，不返回部分结果。
+
+保留闭包：section 是最小保留单位，一个 section 被选中后其中全部符号定义及 relocation 都随之保留。入口 section 直接保留；对每个已保留 section 检查其全部 relocation——local 引用沿现有 linker 规则解析到同一对象内的本地定义，global 引用只跟随完整 plan 链接结果中的胜者——被引用定义所在 section 也必须保留，递归直到不再新增。`weak` 候选只有在完整 plan 的全局解析中胜出且被可达 relocation 引用时才因该引用被带入；被 shadowed 的定义不能仅因名称相同而保留。相同 section 的多条引用、循环引用及多个入口重复到达只保留一次，且不改变最终集合。
+
+过滤与重链：`pruned_plan` 按原始身份过滤——只移除未保留 section，并同步移除其符号定义和 relocation；regions 原样保留；对象记录全部保留，即使某对象没有保留 section。所有数组按身份排序规范化。`pruned_link` 是对 pruned plan 实际调用现有 `link` 的完整结果：移除 section 可能改变对齐布局和后续地址，因此地址与 relocation 字节一律来自重链，不得从完整链接结果直接裁剪；完整 plan 合法而 pruned plan 因过滤不再合法（如重定位值随地址下移溢出）时整次调用拒绝。
+
+成功结果按稳定身份排序：`plan` 含完整 plan 的 link summary；`roots` 为规范化入口列表；`kept_sections`/`excluded_sections` 为保留与排除 section 的 `{object,section}` 身份；`justifications` 对每个保留 section 给出一条可核查的入口到达依据——`kind` 为 `root` 时 `via` 为 null，为 `relocation` 时 `via` 是上游已保留 section 中一条 relocation 的 `{object,section,id}` 身份，沿 via 链可逐段走回某个入口且保证无环，同一 section 可由多条根路径到达时依据确定唯一；`pruned_plan` 与 `pruned_link` 如上；`summary` 给出 regions/objects/sections/roots/kept_sections/excluded_sections 计数；`scope` 明确保留范围只对显式入口及记录在 relocation 中的引用负责，不能据此断言未建模的运行时反射、手写地址或其他隐式引用安全。仅重排任一输入数组（含 roots）时输出必须逐字节一致。`process`、`link`、`certify`、`assess_upgrade`、`build_release_bundle`、`reconcile_rollout` 的既有契约保持不变。
